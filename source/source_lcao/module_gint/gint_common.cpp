@@ -154,6 +154,19 @@ const SpinorComponentMap SPINOR_COMPONENT_MAPS[4] = {
     {0, 3, 1, 1, std::complex<double>(-1.0, 0.0)}
 };
 
+struct DensitySpinBlockMap
+{
+    int row_offset;
+    int col_offset;
+};
+
+const DensitySpinBlockMap DENSITY_SPIN_BLOCK_MAPS[4] = {
+    {0, 0},
+    {0, 1},
+    {1, 0},
+    {1, 1}
+};
+
 hamilt::HContainer<std::complex<double>> make_spinor_gint_container(
     const UnitCell& ucell,
     const std::vector<int>& ijr_info)
@@ -274,6 +287,83 @@ void init_spinor_parallel_orbitals(
 }
 #endif
 
+template<typename TDM>
+hamilt::HContainer<TDM> make_serial_density_spin_block_container(
+    const UnitCell& ucell,
+    const std::vector<int>& ijr_info)
+{
+    hamilt::HContainer<TDM> dm2d_tmp(ucell.nat);
+    dm2d_tmp.insert_ijrs(&ijr_info, ucell);
+    dm2d_tmp.allocate(nullptr, true);
+    return dm2d_tmp;
+}
+
+#ifdef __MPI
+template<typename TDM>
+void init_density_parallel_orbitals(
+    Parallel_Orbitals& pv,
+    const UnitCell& ucell,
+    const hamilt::HContainer<TDM>& dm_spinor)
+{
+    const int mg = dm_spinor.get_paraV()->get_global_row_size() / 2;
+    const int ng = dm_spinor.get_paraV()->get_global_col_size() / 2;
+    const int nb = dm_spinor.get_paraV()->get_block_size() / 2;
+    const int blacs_ctxt = dm_spinor.get_paraV()->blacs_ctxt;
+    std::vector<int> iat2iwt(ucell.nat);
+    for (int iat = 0; iat < ucell.nat; iat++)
+    {
+        iat2iwt[iat] = ucell.get_iat2iwt()[iat] / 2;
+    }
+
+    pv.set(mg, ng, nb, blacs_ctxt);
+    pv.set_atomic_trace(iat2iwt.data(), ucell.nat, mg);
+}
+#endif
+
+template<typename TDM>
+inline void copy_density_spin_block(
+    const TDM* matrix_in,
+    TDM* matrix_out,
+    const int row_size,
+    const int col_size,
+    const DensitySpinBlockMap& map)
+{
+    const int block_row_size = row_size / 2;
+    const int block_col_size = col_size / 2;
+    for (int irow = 0; irow < block_row_size; irow++)
+    {
+        for (int icol = 0; icol < block_col_size; icol++)
+        {
+            const int index_out = irow * block_col_size + icol;
+            const int index_in = (irow * 2 + map.row_offset) * col_size + icol * 2 + map.col_offset;
+            matrix_out[index_out] = matrix_in[index_in];
+        }
+    }
+}
+
+template<typename TDM>
+void extract_density_spin_block(
+    const hamilt::HContainer<TDM>& dm_spinor,
+    const DensitySpinBlockMap& map,
+    hamilt::HContainer<TDM>& dm2d_tmp)
+{
+    for (int iap = 0; iap < dm_spinor.size_atom_pairs(); ++iap)
+    {
+        const auto& ap = dm_spinor.get_atom_pair(iap);
+        const int iat1 = ap.get_atom_i();
+        const int iat2 = ap.get_atom_j();
+        const int row_size = ap.get_row_size();
+        const int col_size = ap.get_col_size();
+        for (int ir = 0; ir < ap.get_R_size(); ++ir)
+        {
+            const ModuleBase::Vector3<int> r_index = ap.get_R_index(ir);
+            TDM* matrix_out = dm2d_tmp.find_matrix(iat1, iat2, r_index)->get_pointer();
+            TDM* matrix_in = ap.get_pointer(ir);
+            copy_density_spin_block(matrix_in, matrix_out, row_size, col_size, map);
+        }
+    }
+}
+
 } // namespace
 
 void merge_hr_part_to_hR(const std::vector<hamilt::HContainer<double>>& hr_gint_tmp,
@@ -351,6 +441,44 @@ gather_dm(const HContainer<TDM>& dm_src, HContainer<TGint>& dm_dst,
     cast_hcontainer_values(dm_tmp, dm_dst);
 }
 
+template<typename TGint, typename TDM>
+void transfer_density_components(
+    const GintInfo& gint_info,
+    const std::vector<HContainer<TDM>*>& dm,
+    std::vector<HContainer<TGint>>& dm_gint)
+{
+    // dm_gint.size() usually equals to PARAM.inp.nspin,
+    // but there is exception within source_lcao/module_lr.
+    for (int is = 0; is < dm_gint.size(); is++)
+    {
+        gather_dm(*dm[is], dm_gint[is], gint_info);
+    }
+}
+
+template<typename TGint, typename TDM>
+void transfer_density_spinor_components(
+    const GintInfo& gint_info,
+    const std::vector<HContainer<TDM>*>& dm,
+    std::vector<HContainer<TGint>>& dm_gint)
+{
+    const UnitCell* ucell = gint_info.get_ucell();
+    auto ijr_info = dm[0]->get_ijr_info();
+
+#ifdef __MPI
+    Parallel_Orbitals pv{};
+    init_density_parallel_orbitals(pv, *ucell, *dm[0]);
+    HContainer<TDM> dm2d_tmp(&pv, nullptr, &ijr_info);
+#else
+    auto dm2d_tmp = make_serial_density_spin_block_container<TDM>(*ucell, ijr_info);
+#endif
+
+    for (int is = 0; is < 4; is++)
+    {
+        extract_density_spin_block(*dm[0], DENSITY_SPIN_BLOCK_MAPS[is], dm2d_tmp);
+        gather_dm(dm2d_tmp, dm_gint[is], gint_info);
+    }
+}
+
 // gint_info should not have been a parameter, but it was added to initialize dm_gint_full
 // In the future, we might try to remove the gint_info parameter
 template<typename TGint, typename TDM>
@@ -364,69 +492,10 @@ void transfer_dm_2d_to_gint(
 
     if (PARAM.inp.nspin != 4)
     {
-        // dm_gint.size() usually equals to PARAM.inp.nspin,
-        // but there is exception within source_lcao/module_lr
-        for (int is = 0; is < dm_gint.size(); is++)
-        {
-            gather_dm(*dm[is], dm_gint[is], gint_info);
-        }
+        transfer_density_components(gint_info, dm, dm_gint);
     } else  // NSPIN=4 case
     {
-
-        // is=0:↑↑, 1:↑↓, 2:↓↑, 3:↓↓
-        const int row_set[4] = {0, 0, 1, 1};
-        const int col_set[4] = {0, 1, 0, 1};
-        int mg = dm[0]->get_paraV()->get_global_row_size()/2;
-        int ng = dm[0]->get_paraV()->get_global_col_size()/2;
-        int nb = dm[0]->get_paraV()->get_block_size()/2;
-        const UnitCell* ucell = gint_info.get_ucell();
-        auto ijr_info = dm[0]->get_ijr_info();
-#ifdef __MPI
-        int blacs_ctxt = dm[0]->get_paraV()->blacs_ctxt;
-        std::vector<int> iat2iwt(ucell->nat);
-        for (int iat = 0; iat < ucell->nat; iat++) {
-            iat2iwt[iat] = ucell->get_iat2iwt()[iat]/2;
-        }
-        Parallel_Orbitals pv{};
-        pv.set(mg, ng, nb, blacs_ctxt);
-        pv.set_atomic_trace(iat2iwt.data(), ucell->nat, mg);
-        HContainer<TDM> dm2d_tmp(&pv, nullptr, &ijr_info);
-#else
-        auto* dm2d_tmp = new hamilt::HContainer<TDM>(ucell->nat);
-        dm2d_tmp -> insert_ijrs(&ijr_info, *ucell);
-        dm2d_tmp -> allocate(nullptr, true);
-#endif
-         for (int is = 0; is < 4; is++){
-            for (int iap = 0; iap < dm[0]->size_atom_pairs(); ++iap) {
-                auto& ap = dm[0]->get_atom_pair(iap);
-                int iat1 = ap.get_atom_i();
-                int iat2 = ap.get_atom_j();
-                for (int ir = 0; ir < ap.get_R_size(); ++ir) {
-                    const ModuleBase::Vector3<int> r_index = ap.get_R_index(ir);
-#ifdef __MPI
-                    TDM* matrix_out = dm2d_tmp.find_matrix(iat1, iat2, r_index)->get_pointer();
-#else
-                    TDM* matrix_out = dm2d_tmp->find_matrix(iat1, iat2, r_index)->get_pointer();
-#endif
-                    TDM* matrix_in = ap.get_pointer(ir);
-                    for (int irow = 0; irow < ap.get_row_size()/2; irow ++) {
-                        for (int icol = 0; icol < ap.get_col_size()/2; icol ++) {
-                            int index_i = irow* ap.get_col_size()/2 + icol;
-                            int index_j = (irow*2+row_set[is]) * ap.get_col_size() + icol*2+col_set[is];
-                            matrix_out[index_i] = matrix_in[index_j];
-                        }
-                    }
-                }
-            }
-#ifdef __MPI
-            gather_dm(dm2d_tmp, dm_gint[is], gint_info);
-#else
-            gather_dm(*dm2d_tmp, dm_gint[is], gint_info);
-#endif
-        }//is=4
-#ifndef __MPI
-        delete dm2d_tmp;
-#endif
+        transfer_density_spinor_components(gint_info, dm, dm_gint);
     }
     ModuleBase::timer::end("Gint", "transfer_dm_2d_to_gint");
 }
