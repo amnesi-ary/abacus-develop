@@ -135,125 +135,185 @@ void transfer_hr_gint_to_hR(const HContainer<T>& hr_gint, HContainer<T>& hR)
 }
 
 
-void merge_hr_part_to_hR(const std::vector<hamilt::HContainer<double>>& hr_gint_tmp ,
+namespace
+{
+
+struct SpinorComponentMap
+{
+    int real_part_idx;
+    int imag_part_idx;
+    int row_offset;
+    int col_offset;
+    std::complex<double> imag_factor;
+};
+
+const SpinorComponentMap SPINOR_COMPONENT_MAPS[4] = {
+    {0, 3, 0, 0, std::complex<double>(1.0, 0.0)},
+    {1, 2, 0, 1, std::complex<double>(0.0, 1.0)},
+    {1, 2, 1, 0, std::complex<double>(0.0, -1.0)},
+    {0, 3, 1, 1, std::complex<double>(-1.0, 0.0)}
+};
+
+hamilt::HContainer<std::complex<double>> make_spinor_gint_container(
+    const UnitCell& ucell,
+    const std::vector<int>& ijr_info)
+{
+    hamilt::HContainer<std::complex<double>> hRGint_tmp(ucell.nat);
+    hRGint_tmp.insert_ijrs(&ijr_info, ucell);
+    hRGint_tmp.allocate(nullptr, true);
+    hRGint_tmp.set_zero();
+    return hRGint_tmp;
+}
+
+void fill_lower_from_upper(
+    const hamilt::AtomPair<std::complex<double>>& upper_ap,
+    hamilt::AtomPair<std::complex<double>>* lower_ap,
+    const ModuleBase::Vector3<int>& R_index)
+{
+    auto upper_mat = upper_ap.find_matrix(R_index);
+    auto lower_mat = lower_ap->find_matrix(-R_index);
+    for (int irow = 0; irow < upper_mat->get_row_size(); ++irow)
+    {
+        for (int icol = 0; icol < upper_mat->get_col_size(); ++icol)
+        {
+            lower_mat->get_value(icol, irow) = upper_mat->get_value(irow, icol);
+        }
+    }
+}
+
+void fill_spinor_component(
+    const std::vector<hamilt::HContainer<double>>& hr_gint_tmp,
+    const SpinorComponentMap& map,
+    hamilt::HContainer<std::complex<double>>& hRGint_tmp)
+{
+    for (int iap = 0; iap < hRGint_tmp.size_atom_pairs(); iap++)
+    {
+        auto* upper_ap = &hRGint_tmp.get_atom_pair(iap);
+        const int iat1 = upper_ap->get_atom_i();
+        const int iat2 = upper_ap->get_atom_j();
+        if (iat1 > iat2)
+        {
+            continue;
+        }
+
+        hamilt::AtomPair<std::complex<double>>* lower_ap = hRGint_tmp.find_pair(iat2, iat1);
+        const hamilt::AtomPair<double>* ap_real = hr_gint_tmp[map.real_part_idx].find_pair(iat1, iat2);
+        const hamilt::AtomPair<double>* ap_imag = hr_gint_tmp[map.imag_part_idx].find_pair(iat1, iat2);
+
+        for (int ir = 0; ir < upper_ap->get_R_size(); ir++)
+        {
+            const auto R_index = upper_ap->get_R_index(ir);
+            auto upper_mat = upper_ap->find_matrix(R_index);
+            auto mat_real = ap_real->find_matrix(R_index);
+            auto mat_imag = ap_imag->find_matrix(R_index);
+            for (int irow = 0; irow < mat_real->get_row_size(); ++irow)
+            {
+                for (int icol = 0; icol < mat_real->get_col_size(); ++icol)
+                {
+                    upper_mat->get_value(irow, icol)
+                        = mat_real->get_value(irow, icol) + map.imag_factor * mat_imag->get_value(irow, icol);
+                }
+            }
+
+            // When component 0 or 3 is used, the real part does not need conjugation.
+            // Components 1 and 2 are not Hermitian small matrices, so conjugation is also not applied.
+            if (iat1 < iat2)
+            {
+                fill_lower_from_upper(*upper_ap, lower_ap, R_index);
+            }
+        }
+    }
+}
+
+void merge_component_to_hR(
+    const hamilt::HContainer<std::complex<double>>& hR_tmp,
+    const SpinorComponentMap& map,
+    hamilt::HContainer<std::complex<double>>& hR)
+{
+    for (int iap = 0; iap < hR.size_atom_pairs(); iap++)
+    {
+        auto* ap = &hR.get_atom_pair(iap);
+        const int iat1 = ap->get_atom_i();
+        const int iat2 = ap->get_atom_j();
+        const auto* ap_nspin = hR_tmp.find_pair(iat1, iat2);
+        for (int ir = 0; ir < ap->get_R_size(); ir++)
+        {
+            const auto R_index = ap->get_R_index(ir);
+            auto upper_mat = ap->find_matrix(R_index);
+            auto mat_nspin = ap_nspin->find_matrix(R_index);
+            for (int irow = 0; irow < mat_nspin->get_row_size(); ++irow)
+            {
+                for (int icol = 0; icol < mat_nspin->get_col_size(); ++icol)
+                {
+                    upper_mat->get_value(2 * irow + map.row_offset, 2 * icol + map.col_offset)
+                        = mat_nspin->get_value(irow, icol);
+                }
+            }
+        }
+    }
+}
+
+#ifdef __MPI
+void init_spinor_parallel_orbitals(
+    Parallel_Orbitals& pv,
+    const UnitCell& ucell,
+    const hamilt::HContainer<std::complex<double>>& hR)
+{
+    const int mg = hR.get_paraV()->get_global_row_size() / 2;
+    const int ng = hR.get_paraV()->get_global_col_size() / 2;
+    const int nb = hR.get_paraV()->get_block_size() / 2;
+    const int blacs_ctxt = hR.get_paraV()->blacs_ctxt;
+    std::vector<int> iat2iwt(ucell.nat);
+    for (int iat = 0; iat < ucell.nat; iat++)
+    {
+        iat2iwt[iat] = ucell.get_iat2iwt()[iat] / 2;
+    }
+
+    pv.set(mg, ng, nb, blacs_ctxt);
+    pv.set_atomic_trace(iat2iwt.data(), ucell.nat, mg);
+}
+#endif
+
+} // namespace
+
+void merge_hr_part_to_hR(const std::vector<hamilt::HContainer<double>>& hr_gint_tmp,
                          hamilt::HContainer<std::complex<double>>* hR,
-                         const GintInfo& gint_info){
+                         const GintInfo& gint_info)
+{
     ModuleBase::TITLE("Gint_k", "transfer_pvpR");
     ModuleBase::timer::start("Gint_k", "transfer_pvpR");
 
     const UnitCell* ucell_in = gint_info.get_ucell();
-    int mg = hR->get_paraV()->get_global_row_size()/2;
-    int ng = hR->get_paraV()->get_global_col_size()/2;
-    int nb = hR->get_paraV()->get_block_size()/2;
-    hamilt::HContainer<std::complex<double>>* hR_tmp;
-
 
 #ifdef __MPI
-    int blacs_ctxt = hR->get_paraV()->blacs_ctxt;
-    std::vector<int> iat2iwt(ucell_in->nat);
-    for (int iat = 0; iat < ucell_in->nat; iat++) {
-        iat2iwt[iat] = ucell_in->get_iat2iwt()[iat]/2;
-    }
-    Parallel_Orbitals *pv = new Parallel_Orbitals();
-    pv->set(mg, ng, nb, blacs_ctxt);
-    pv->set_atomic_trace(iat2iwt.data(), ucell_in->nat, mg);
+    Parallel_Orbitals pv;
+    init_spinor_parallel_orbitals(pv, *ucell_in, *hR);
     auto ijr_info = hR->get_ijr_info();
-    hR_tmp = new hamilt::HContainer<std::complex<double>>(pv, nullptr, &ijr_info);
+    hamilt::HContainer<std::complex<double>> hR_tmp(&pv, nullptr, &ijr_info);
 #endif
 
-    //select hr_gint_tmp 
-    std::vector<int> first = {0, 1, 1, 0};
-    std::vector<int> second= {3, 2, 2, 3};
-    //select position in the big matrix
-    std::vector<int> row_set = {0, 0, 1, 1};
-    std::vector<int> col_set = {0, 1, 0, 1};
-    //construct complex matrix
-    std::vector<int> clx_i = {1, 0, 0, -1};
-    std::vector<int> clx_j = {0, 1, -1, 0};
-    for (int is = 0; is < 4; is++){
-        if(!PARAM.globalv.domag && (is==1 || is==2)) continue;
-        hR_tmp->set_zero();
-        hamilt::HContainer<std::complex<double>>* hRGint_tmpCd = new hamilt::HContainer<std::complex<double>>(ucell_in->nat);
-        hRGint_tmpCd->insert_ijrs( &(gint_info.get_ijr_info()), *(ucell_in));
-        hRGint_tmpCd->allocate(nullptr, true);
-        hRGint_tmpCd->set_zero();
-        for (int iap = 0; iap < hRGint_tmpCd->size_atom_pairs(); iap++)
+    for (int is = 0; is < 4; is++)
+    {
+        if (!PARAM.globalv.domag && (is == 1 || is == 2))
         {
-            auto* ap = &hRGint_tmpCd->get_atom_pair(iap);
-            const int iat1 = ap->get_atom_i();
-            const int iat2 = ap->get_atom_j();
-            if (iat1 <= iat2)
-            {
-                hamilt::AtomPair<std::complex<double>>* upper_ap = ap;
-                hamilt::AtomPair<std::complex<double>>* lower_ap = hRGint_tmpCd->find_pair(iat2, iat1);
-                const hamilt::AtomPair<double>* ap_nspin1 = hr_gint_tmp [first[is]].find_pair(iat1, iat2);
-                const hamilt::AtomPair<double>* ap_nspin2 = hr_gint_tmp [second[is]].find_pair(iat1, iat2);
-                for (int ir = 0; ir < upper_ap->get_R_size(); ir++)
-                {   
-                    const auto R_index = upper_ap->get_R_index(ir);
-                    auto upper_mat = upper_ap->find_matrix(R_index);
-                    auto mat_nspin1 = ap_nspin1->find_matrix(R_index);
-                    auto mat_nspin2 = ap_nspin2->find_matrix(R_index);
-                    // The row size and the col size of upper_matrix is double that of matrix_nspin_0
-                    for (int irow = 0; irow < mat_nspin1->get_row_size(); ++irow)
-                    {
-                        for (int icol = 0; icol < mat_nspin1->get_col_size(); ++icol)
-                        {
-                            upper_mat->get_value(irow, icol) = mat_nspin1->get_value(irow, icol) 
-                            + std::complex<double>(clx_i[is], clx_j[is]) * mat_nspin2->get_value(irow, icol);
-                        }
-                    }
-                    //fill the lower triangle matrix
-                    //When is=0 or 3, the real part does not need conjugation; 
-                    //when is=1 or 2, the small matrix is not Hermitian, so conjugation is not needed
-                    if (iat1 < iat2)
-                    {
-                        auto lower_mat = lower_ap->find_matrix(-R_index);
-                        for (int irow = 0; irow < upper_mat->get_row_size(); ++irow)
-                        {
-                            for (int icol = 0; icol < upper_mat->get_col_size(); ++icol)
-                            {
-                                lower_mat->get_value(icol, irow) = upper_mat->get_value(irow, icol);
-                            }
-                        }
-                    }
-
-                }
-            }
+            continue;
         }
-        // transfer hRGint_tmpCd to parallel hR_tmp
+
+        const auto& map = SPINOR_COMPONENT_MAPS[is];
+        auto hRGint_tmp = make_spinor_gint_container(*ucell_in, gint_info.get_ijr_info());
+
+        fill_spinor_component(hr_gint_tmp, map, hRGint_tmp);
+
 #ifdef __MPI
-        hamilt::transferSerials2Parallels( *hRGint_tmpCd, hR_tmp);
+        hR_tmp.set_zero();
+        hamilt::transferSerials2Parallels(hRGint_tmp, &hR_tmp);
+        merge_component_to_hR(hR_tmp, map, *hR);
 #else
-        hR_tmp = hRGint_tmpCd;
+        merge_component_to_hR(hRGint_tmp, map, *hR);
 #endif
-        // merge hR_tmp to hR
-        for (int iap = 0; iap < hR->size_atom_pairs(); iap++)
-        {
-            auto* ap = &hR->get_atom_pair(iap);
-            const int iat1 = ap->get_atom_i();
-            const int iat2 = ap->get_atom_j();
-            auto* ap_nspin = hR_tmp ->find_pair(iat1, iat2);
-            for (int ir = 0; ir < ap->get_R_size(); ir++)
-            {   
-                const auto R_index = ap->get_R_index(ir);
-                auto upper_mat = ap->find_matrix(R_index);
-                auto mat_nspin = ap_nspin->find_matrix(R_index);
-                // The row size and the col size of upper_matrix is double that of matrix_nspin_0
-                for (int irow = 0; irow < mat_nspin->get_row_size(); ++irow)
-                {
-                    for (int icol = 0; icol < mat_nspin->get_col_size(); ++icol)
-                    {
-                        upper_mat->get_value(2*irow+row_set[is], 2*icol+col_set[is]) = 
-                        mat_nspin->get_value(irow, icol);
-                    }
-                }
-            }
-        }
-        delete hRGint_tmpCd;
     }
+
     ModuleBase::timer::end("Gint_k", "transfer_pvpR");
-    return;
 }
 
 
