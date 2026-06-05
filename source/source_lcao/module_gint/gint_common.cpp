@@ -167,6 +167,16 @@ const DensitySpinBlockMap DENSITY_SPIN_BLOCK_MAPS[4] = {
     {1, 1}
 };
 
+std::vector<int> make_spinor_iat2iwt(const UnitCell& ucell)
+{
+    std::vector<int> iat2iwt(ucell.nat);
+    for (int iat = 0; iat < ucell.nat; iat++)
+    {
+        iat2iwt[iat] = ucell.get_iat2iwt()[iat] / 2;
+    }
+    return iat2iwt;
+}
+
 hamilt::HContainer<std::complex<double>> make_spinor_gint_container(
     const UnitCell& ucell,
     const std::vector<int>& ijr_info)
@@ -270,17 +280,13 @@ void merge_component_to_hR(
 void init_spinor_parallel_orbitals(
     Parallel_Orbitals& pv,
     const UnitCell& ucell,
-    const hamilt::HContainer<std::complex<double>>& hR)
+    const hamilt::HContainer<std::complex<double>>& hR,
+    const std::vector<int>& iat2iwt)
 {
     const int mg = hR.get_paraV()->get_global_row_size() / 2;
     const int ng = hR.get_paraV()->get_global_col_size() / 2;
     const int nb = hR.get_paraV()->get_block_size() / 2;
     const int blacs_ctxt = hR.get_paraV()->blacs_ctxt;
-    std::vector<int> iat2iwt(ucell.nat);
-    for (int iat = 0; iat < ucell.nat; iat++)
-    {
-        iat2iwt[iat] = ucell.get_iat2iwt()[iat] / 2;
-    }
 
     pv.set(mg, ng, nb, blacs_ctxt);
     pv.set_atomic_trace(iat2iwt.data(), ucell.nat, mg);
@@ -303,17 +309,13 @@ template<typename TDM>
 void init_density_parallel_orbitals(
     Parallel_Orbitals& pv,
     const UnitCell& ucell,
-    const hamilt::HContainer<TDM>& dm_spinor)
+    const hamilt::HContainer<TDM>& dm_spinor,
+    const std::vector<int>& iat2iwt)
 {
     const int mg = dm_spinor.get_paraV()->get_global_row_size() / 2;
     const int ng = dm_spinor.get_paraV()->get_global_col_size() / 2;
     const int nb = dm_spinor.get_paraV()->get_block_size() / 2;
     const int blacs_ctxt = dm_spinor.get_paraV()->blacs_ctxt;
-    std::vector<int> iat2iwt(ucell.nat);
-    for (int iat = 0; iat < ucell.nat; iat++)
-    {
-        iat2iwt[iat] = ucell.get_iat2iwt()[iat] / 2;
-    }
 
     pv.set(mg, ng, nb, blacs_ctxt);
     pv.set_atomic_trace(iat2iwt.data(), ucell.nat, mg);
@@ -376,8 +378,9 @@ void merge_hr_part_to_hR(const std::vector<hamilt::HContainer<double>>& hr_gint_
     const UnitCell* ucell_in = gint_info.get_ucell();
 
 #ifdef __MPI
+    const auto iat2iwt = make_spinor_iat2iwt(*ucell_in);
     Parallel_Orbitals pv;
-    init_spinor_parallel_orbitals(pv, *ucell_in, *hR);
+    init_spinor_parallel_orbitals(pv, *ucell_in, *hR, iat2iwt);
     auto ijr_info = hR->get_ijr_info();
     hamilt::HContainer<std::complex<double>> hR_tmp(&pv, nullptr, &ijr_info);
 #endif
@@ -465,8 +468,9 @@ void transfer_density_spinor_components(
     auto ijr_info = dm[0]->get_ijr_info();
 
 #ifdef __MPI
+    const auto iat2iwt = make_spinor_iat2iwt(*ucell);
     Parallel_Orbitals pv{};
-    init_density_parallel_orbitals(pv, *ucell, *dm[0]);
+    init_density_parallel_orbitals(pv, *ucell, *dm[0], iat2iwt);
     HContainer<TDM> dm2d_tmp(&pv, nullptr, &ijr_info);
 #else
     auto dm2d_tmp = make_serial_density_spin_block_container<TDM>(*ucell, ijr_info);
