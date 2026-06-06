@@ -30,8 +30,9 @@ void cast_hcontainer_values(const HContainer<Tin>& src, HContainer<Tout>& dst)
         ModuleBase::WARNING_QUIT("cast_hcontainer_values", "HContainer data buffer is not allocated.");
     }
 
-    const size_t nnr = src.get_nnr();
-    for (size_t i = 0; i < nnr; ++i)
+    const long long nnr = static_cast<long long>(src.get_nnr());
+#pragma omp parallel for schedule(static)
+    for (long long i = 0; i < nnr; ++i)
     {
         dst_values[i] = static_cast<Tout>(src_values[i]);
     }
