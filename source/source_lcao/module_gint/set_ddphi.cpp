@@ -6,6 +6,32 @@
 namespace ModuleGint
 {
 
+namespace
+{
+struct DphiTensor
+{
+    static constexpr int kDisplacements = 6;
+    static constexpr int kDirections = 3;
+
+    explicit DphiTensor(const int nw)
+        : data_(nw * kDisplacements * kDirections)
+    {}
+
+    double& operator()(const int iw, const int displacement, const int direction)
+    {
+        return data_[(iw * kDisplacements + displacement) * kDirections + direction];
+    }
+
+    const double& operator()(const int iw, const int displacement, const int direction) const
+    {
+        return data_[(iw * kDisplacements + displacement) * kDirections + direction];
+    }
+
+  private:
+    std::vector<double> data_;
+};
+}
+
 template <typename T>
 void GintAtom::set_ddphi(
     const std::vector<Vec3d>& coords, const int stride,
@@ -22,8 +48,7 @@ void GintAtom::set_ddphi(
     const int nylm = std::pow(atom_->nwl + 1, 2);
     std::vector<double> rly(nylm);
     std::vector<double> grly(nylm * 3);
-    // TODO: A better data structure such as a 3D tensor can be used to store dphi
-    std::vector<std::vector<std::vector<double>>> dphi(atom_->nw, std::vector<std::vector<double>>(6, std::vector<double>(3)));
+    DphiTensor dphi(atom_->nw);
     Vec3d coord1;
     constexpr double displ[6][3] = {
         { 0.0001,  0.0,     0.0},    // +x
@@ -100,24 +125,24 @@ void GintAtom::set_ddphi(
                 const double tmpdphi_rly = (dtmp - tmp * ll / dist1) / rl * rly[idx_lm] / dist1;
                 const double tmprl = tmp / rl;
 
-                dphi[iw][i][0] =  tmpdphi_rly * coord1[0] + tmprl * grly[idx_lm*3];
-                dphi[iw][i][1] =  tmpdphi_rly * coord1[1] + tmprl * grly[idx_lm*3 + 1];
-                dphi[iw][i][2] =  tmpdphi_rly * coord1[2] + tmprl * grly[idx_lm*3 + 2];
+                dphi(iw, i, 0) =  tmpdphi_rly * coord1[0] + tmprl * grly[idx_lm*3];
+                dphi(iw, i, 1) =  tmpdphi_rly * coord1[1] + tmprl * grly[idx_lm*3 + 1];
+                dphi(iw, i, 2) =  tmpdphi_rly * coord1[2] + tmprl * grly[idx_lm*3 + 2];
             } // end iw
         }  // end i
 
         for(int iw = 0; iw < atom_->nw; iw++)
         {
             int idx = im * stride + iw;
-            ddphi_xx[idx] = (dphi[iw][0][0] - dphi[iw][1][0]) / 0.0002;
+            ddphi_xx[idx] = (dphi(iw, 0, 0) - dphi(iw, 1, 0)) / 0.0002;
             ddphi_xy[idx]
-                = ((dphi[iw][2][0] - dphi[iw][3][0]) + (dphi[iw][0][1] - dphi[iw][1][1])) / 0.0004;
+                = ((dphi(iw, 2, 0) - dphi(iw, 3, 0)) + (dphi(iw, 0, 1) - dphi(iw, 1, 1))) / 0.0004;
             ddphi_xz[idx]
-                = ((dphi[iw][4][0] - dphi[iw][5][0]) + (dphi[iw][0][2] - dphi[iw][1][2])) / 0.0004;
-            ddphi_yy[idx] = (dphi[iw][2][1] - dphi[iw][3][1]) / 0.0002;
+                = ((dphi(iw, 4, 0) - dphi(iw, 5, 0)) + (dphi(iw, 0, 2) - dphi(iw, 1, 2))) / 0.0004;
+            ddphi_yy[idx] = (dphi(iw, 2, 1) - dphi(iw, 3, 1)) / 0.0002;
             ddphi_yz[idx]
-                = ((dphi[iw][4][1] - dphi[iw][5][1]) + (dphi[iw][2][2] - dphi[iw][3][2])) / 0.0004;
-            ddphi_zz[idx] = (dphi[iw][4][2] - dphi[iw][5][2]) / 0.0002;
+                = ((dphi(iw, 4, 1) - dphi(iw, 5, 1)) + (dphi(iw, 2, 2) - dphi(iw, 3, 2))) / 0.0004;
+            ddphi_zz[idx] = (dphi(iw, 4, 2) - dphi(iw, 5, 2)) / 0.0002;
         }
 
         // else
