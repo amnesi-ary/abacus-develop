@@ -6,6 +6,20 @@
 namespace ModuleGint
 {
 
+namespace
+{
+void add_hcontainer_values(const HContainer<double>& src, HContainer<double>& dst)
+{
+    const size_t nnr = dst.get_nnr();
+    const double* src_values = src.get_wrapper();
+    double* dst_values = dst.get_wrapper();
+    for (size_t i = 0; i < nnr; ++i)
+    {
+        dst_values[i] += src_values[i];
+    }
+}
+}
+
 void Gint_dvlocal::cal_dvlocal()
 {
     ModuleBase::TITLE("Gint", "cal_gint_dvlocal");
@@ -32,6 +46,9 @@ void Gint_dvlocal::cal_hr_gint_()
         std::vector<double> dphi_x;
         std::vector<double> dphi_y;
         std::vector<double> dphi_z;
+        auto pvdpRx_thread = gint_info_->get_hr<double>();
+        auto pvdpRy_thread = gint_info_->get_hr<double>();
+        auto pvdpRz_thread = gint_info_->get_hr<double>();
 #pragma omp for schedule(dynamic)
         for (int i = 0; i < gint_info_->get_bgrids_num(); i++)
         {
@@ -49,9 +66,27 @@ void Gint_dvlocal::cal_hr_gint_()
             dphi_z.resize(phi_len);
             phi_op.set_phi_dphi(phi.data(), dphi_x.data(), dphi_y.data(), dphi_z.data());
             phi_op.phi_mul_vldr3(vr_eff_, dr3_, phi.data(), phi_vldr3.data());
-            phi_op.phi_mul_phi(phi_vldr3.data(), dphi_x.data(), pvdpRx, PhiOperator::Triangular_Matrix::Upper);
-            phi_op.phi_mul_phi(phi_vldr3.data(), dphi_y.data(), pvdpRy, PhiOperator::Triangular_Matrix::Upper);
-            phi_op.phi_mul_phi(phi_vldr3.data(), dphi_z.data(), pvdpRz, PhiOperator::Triangular_Matrix::Upper);
+            phi_op.phi_mul_phi(phi_vldr3.data(),
+                               dphi_x.data(),
+                               pvdpRx_thread,
+                               PhiOperator::Triangular_Matrix::Upper,
+                               false);
+            phi_op.phi_mul_phi(phi_vldr3.data(),
+                               dphi_y.data(),
+                               pvdpRy_thread,
+                               PhiOperator::Triangular_Matrix::Upper,
+                               false);
+            phi_op.phi_mul_phi(phi_vldr3.data(),
+                               dphi_z.data(),
+                               pvdpRz_thread,
+                               PhiOperator::Triangular_Matrix::Upper,
+                               false);
+        }
+#pragma omp critical(Gint_dvlocal_merge)
+        {
+            add_hcontainer_values(pvdpRx_thread, pvdpRx);
+            add_hcontainer_values(pvdpRy_thread, pvdpRy);
+            add_hcontainer_values(pvdpRz_thread, pvdpRz);
         }
     }
 }

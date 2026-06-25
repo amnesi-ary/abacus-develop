@@ -104,13 +104,14 @@ void PhiOperator::phi_mul_vldr3(
 }
 
 // hr(iwt_i,iwt_j) += \sum_{ir} phi_i(ir,iwt_i) * phi_i(ir,iwt_j)
-// this is a thread-safe function
+// Locked accumulation is needed unless hr is thread-private.
 template<typename T>
 void PhiOperator::phi_mul_phi(
     const T*const phi_i,                // phi_i(ir,iwt)
     const T*const phi_j,                // phi_j(ir,iwt)
     HContainer<T>& hr,                  // hr(iwt_i,iwt_j)
-    const Triangular_Matrix triangular_matrix) const
+    const Triangular_Matrix triangular_matrix,
+    const bool need_thread_safe) const
 {
     std::vector<T> tmp_hr;
     for(int i = 0; i < biggrid_->get_atoms_num(); ++i)
@@ -166,7 +167,14 @@ void PhiOperator::phi_mul_phi(
 		        beta, tmp_hr.data(), n_j,
                 base_device::AbacusDevice_t::CpuDevice);
 
-            result->add_array_ts(tmp_hr.data());
+            if(need_thread_safe)
+            {
+                result->add_array_ts(tmp_hr.data());
+            }
+            else
+            {
+                result->add_array(tmp_hr.data());
+            }
         }
     }
 }
