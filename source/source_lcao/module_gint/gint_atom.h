@@ -17,6 +17,7 @@ class GintAtom
         {
             int begin_iw = 0;
             int size = 0;
+            int l = 0;
             int ylm_begin = 0;
             const double* psi_uniform = nullptr;
             const double* dpsi_uniform = nullptr;
