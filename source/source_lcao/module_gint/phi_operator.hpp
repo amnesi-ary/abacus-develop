@@ -91,14 +91,15 @@ void PhiOperator::phi_mul_vldr3(
     const T*const phi,                  // phi(ir,iwt)
     T*const result) const               // result(ir,iwt)
 {
-    int idx = 0;
     for(int i = 0; i < biggrid_->get_mgrids_num(); i++)
     {
-        T vldr3_mgrid = vl[meshgrids_local_idx_[i]] * dr3;
+        const T vldr3_mgrid = vl[meshgrids_local_idx_[i]] * dr3;
+        const T* const phi_row = phi + i * cols_;
+        T* const result_row = result + i * cols_;
+#pragma omp simd
         for(int j = 0; j < cols_; j++)
         {
-            result[idx] = phi[idx] * vldr3_mgrid;
-            idx++;
+            result_row[j] = phi_row[j] * vldr3_mgrid;
         }
     }
 }

@@ -80,13 +80,18 @@ void PhiOperator::phi_dot_dphi(
         double rx = 0, ry = 0, rz = 0;
         for(int j = 0; j < biggrid_->get_mgrids_num(); ++j)
         {
+            const int base = j * cols_ + start_idx;
+            const double* const phi_row = phi + base;
+            const double* const dphi_x_row = dphi_x + base;
+            const double* const dphi_y_row = dphi_y + base;
+            const double* const dphi_z_row = dphi_z + base;
+#pragma omp simd reduction(+:rx, ry, rz)
             for(int k = 0; k < phi_len; ++k)
             {
-                int idx = j * cols_ + start_idx + k;
-                const double phi_val = phi[idx];
-                rx += phi_val * dphi_x[idx];
-                ry += phi_val * dphi_y[idx];
-                rz += phi_val * dphi_z[idx];
+                const double phi_val = phi_row[k];
+                rx += phi_val * dphi_x_row[k];
+                ry += phi_val * dphi_y_row[k];
+                rz += phi_val * dphi_z_row[k];
             }
         }
         fvl[0](iat, 0) += rx * 2;
@@ -109,16 +114,24 @@ void PhiOperator::phi_dot_dphi_r(
         {
             const int start_idx = atoms_startidx_[j];
             const Vec3d& r3 = atoms_relative_coords_[j][i];
+            const double rx = r3[0];
+            const double ry = r3[1];
+            const double rz = r3[2];
+            const int base = i * cols_ + start_idx;
+            const double* const phi_row = phi + base;
+            const double* const dphi_x_row = dphi_x + base;
+            const double* const dphi_y_row = dphi_y + base;
+            const double* const dphi_z_row = dphi_z + base;
+#pragma omp simd reduction(+:sxx, sxy, sxz, syy, syz, szz)
             for(int k = 0; k < atoms_phi_len_[j]; ++k)
             {
-                const int idx = i * cols_ + start_idx + k;
-                const double phi_val = phi[idx];
-                sxx += phi_val * dphi_x[idx] * r3[0];
-                sxy += phi_val * dphi_x[idx] * r3[1];
-                sxz += phi_val * dphi_x[idx] * r3[2];
-                syy += phi_val * dphi_y[idx] * r3[1];
-                syz += phi_val * dphi_y[idx] * r3[2];
-                szz += phi_val * dphi_z[idx] * r3[2];
+                const double phi_val = phi_row[k];
+                sxx += phi_val * dphi_x_row[k] * rx;
+                sxy += phi_val * dphi_x_row[k] * ry;
+                sxz += phi_val * dphi_x_row[k] * rz;
+                syy += phi_val * dphi_y_row[k] * ry;
+                syz += phi_val * dphi_y_row[k] * rz;
+                szz += phi_val * dphi_z_row[k] * rz;
             }
         }
     }
