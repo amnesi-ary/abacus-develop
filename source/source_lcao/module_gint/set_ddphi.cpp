@@ -1,36 +1,11 @@
 #include "source_base/timer.h"
 #include "source_base/ylm.h"
+#include "dphi_tensor.h"
 #include "gint_atom.h"
 #include "gint_helper.h"
 
 namespace ModuleGint
 {
-
-namespace
-{
-struct DphiTensor
-{
-    static constexpr int kDisplacements = 6;
-    static constexpr int kDirections = 3;
-
-    explicit DphiTensor(const int nw)
-        : data_(nw * kDisplacements * kDirections)
-    {}
-
-    double& operator()(const int iw, const int displacement, const int direction)
-    {
-        return data_[(iw * kDisplacements + displacement) * kDirections + direction];
-    }
-
-    const double& operator()(const int iw, const int displacement, const int direction) const
-    {
-        return data_[(iw * kDisplacements + displacement) * kDirections + direction];
-    }
-
-  private:
-    std::vector<double> data_;
-};
-}
 
 template <typename T>
 void GintAtom::set_ddphi(
@@ -48,7 +23,7 @@ void GintAtom::set_ddphi(
     const int nylm = std::pow(atom_->nwl + 1, 2);
     std::vector<double> rly(nylm);
     std::vector<double> grly(nylm * 3);
-    DphiTensor dphi(atom_->nw);
+    detail::DphiTensor dphi(atom_->nw);
     Vec3d coord1;
     constexpr double displ[6][3] = {
         { 0.0001,  0.0,     0.0},    // +x
