@@ -64,13 +64,14 @@ class PhiOperator
         T*const result) const;              // result(ir,iwt)
 
     // hr(iwt_i,iwt_j) = \sum_{ir} phi_i(ir,iwt_i) * phi_i(ir,iwt_j)
-    // this is a thread-safe function
+    // Locked accumulation is needed unless hr is thread-private.
     template<typename T>
     void phi_mul_phi(
         const T*const phi_i,                // phi_i(ir,iwt)
         const T*const phi_j,                // phi_j(ir,iwt)
         HContainer<T>& hr,                  // hr(iwt_i,iwt_j)
-        const Triangular_Matrix triangular_matrix) const;
+        const Triangular_Matrix triangular_matrix,
+        const bool need_thread_safe = true) const;
 
     // rho(ir) = \sum_{iwt} \phi_i(ir,iwt) * \phi_j(ir,iwt)
     template<typename Tin, typename Tout = Tin>
