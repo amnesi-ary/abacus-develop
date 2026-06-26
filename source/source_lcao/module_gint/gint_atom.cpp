@@ -35,6 +35,7 @@ GintAtom::GintAtom(
             RadialBlock block;
             block.begin_iw = iw;
             block.size = 2 * l + 1;
+            block.l = l;
             // The first orbital in each radial block always starts from m = 0.
             block.ylm_begin = atom_->iw2_ylm[iw];
             block.psi_uniform = p_psi_uniform_[iw];
@@ -129,6 +130,8 @@ void GintAtom::set_phi_dphi(
     const int nylm = std::pow(atom_->nwl + 1, 2);
     std::vector<double> rly(nylm);
     std::vector<double> grly(nylm * 3);
+    const auto* blocks = radial_blocks_.data();
+    const int num_blocks = radial_blocks_.size();
     
     for(int im = 0; im < num_mgrids; im++)
     {
@@ -165,44 +168,64 @@ void GintAtom::set_phi_dphi(
             const double x12 = x1 * x2 / 6;
             const double x03 = x0 * x3 / 2;
 
-            double tmp, dtmp;
-            for(int iw = 0; iw < atom_->nw; ++iw)
+            T* const phi_row = phi == nullptr ? nullptr : phi + im * stride;
+            T* const dphi_x_row = dphi_x + im * stride;
+            T* const dphi_y_row = dphi_y + im * stride;
+            T* const dphi_z_row = dphi_z + im * stride;
+            const double coord_x = coord.x;
+            const double coord_y = coord.y;
+            const double coord_z = coord.z;
+
+            for (int ib = 0; ib < num_blocks; ++ib)
             {
-                // this is a new 'l', we need 1D orbital wave
-                // function from interpolation method.
-                if(atom_->iw2_new[iw])
-                {
-                    auto psi_uniform = p_psi_uniform_[iw];
-                    auto dpsi_uniform = p_dpsi_uniform_[iw];
-                    // use Polynomia Interpolation method to get the
-                    // wave functions
+                const auto& block = blocks[ib];
+                const double* const psi_uniform = block.psi_uniform;
+                const double* const dpsi_uniform = block.dpsi_uniform;
 
-                    tmp = x12 * (psi_uniform[ip] * x3 + psi_uniform[ip + 3] * x0)
-                        + x03 * (psi_uniform[ip + 1] * x2 - psi_uniform[ip + 2] * x1);
+                // use Polynomia Interpolation method to get the wave functions
+                const double tmp = x12 * (psi_uniform[ip] * x3 + psi_uniform[ip + 3] * x0)
+                    + x03 * (psi_uniform[ip + 1] * x2 - psi_uniform[ip + 2] * x1);
 
-                    dtmp = x12 * (dpsi_uniform[ip] * x3 + dpsi_uniform[ip + 3] * x0)
-                        + x03 * (dpsi_uniform[ip + 1] * x2 - dpsi_uniform[ip + 2] * x1);
-                } // new l is used.
+                const double dtmp = x12 * (dpsi_uniform[ip] * x3 + dpsi_uniform[ip + 3] * x0)
+                    + x03 * (dpsi_uniform[ip + 1] * x2 - dpsi_uniform[ip + 2] * x1);
 
-                // get the 'l' of this localized wave function
-                const int ll = atom_->iw2l[iw];
-                const int idx_lm = atom_->iw2_ylm[iw];
-
+                const int ll = block.l;
+                const int begin_iw = block.begin_iw;
+                const int ylm_begin = block.ylm_begin;
                 const double rl = pow_int(dist, ll);
                 const double tmprl = tmp / rl;
+                const double tmpdphi_factor = (dtmp - tmp * ll / dist) / rl / dist;
 
-                // 3D wave functions
                 if(phi != nullptr)
                 {
-                    phi[im * stride + iw] = tmprl * rly[idx_lm];
-                }
-                
-                // derivative of wave functions with respect to atom positions.
-                const double tmpdphi_rly = (dtmp - tmp * ll / dist) / rl * rly[idx_lm] / dist;
+#pragma omp simd
+                    for (int offset = 0; offset < block.size; ++offset)
+                    {
+                        const int idx_lm = ylm_begin + offset;
+                        const double rly_val = rly[idx_lm];
+                        const double tmpdphi_rly = tmpdphi_factor * rly_val;
+                        const int iw = begin_iw + offset;
 
-                dphi_x[im * stride + iw] =  tmpdphi_rly * coord.x + tmprl * grly[idx_lm*3];
-                dphi_y[im * stride + iw] =  tmpdphi_rly * coord.y + tmprl * grly[idx_lm*3 + 1];
-                dphi_z[im * stride + iw] =  tmpdphi_rly * coord.z + tmprl * grly[idx_lm*3 + 2];
+                        phi_row[iw] = static_cast<T>(tmprl * rly_val);
+                        dphi_x_row[iw] = static_cast<T>(tmpdphi_rly * coord_x + tmprl * grly[idx_lm * 3]);
+                        dphi_y_row[iw] = static_cast<T>(tmpdphi_rly * coord_y + tmprl * grly[idx_lm * 3 + 1]);
+                        dphi_z_row[iw] = static_cast<T>(tmpdphi_rly * coord_z + tmprl * grly[idx_lm * 3 + 2]);
+                    }
+                }
+                else
+                {
+#pragma omp simd
+                    for (int offset = 0; offset < block.size; ++offset)
+                    {
+                        const int idx_lm = ylm_begin + offset;
+                        const double tmpdphi_rly = tmpdphi_factor * rly[idx_lm];
+                        const int iw = begin_iw + offset;
+
+                        dphi_x_row[iw] = static_cast<T>(tmpdphi_rly * coord_x + tmprl * grly[idx_lm * 3]);
+                        dphi_y_row[iw] = static_cast<T>(tmpdphi_rly * coord_y + tmprl * grly[idx_lm * 3 + 1]);
+                        dphi_z_row[iw] = static_cast<T>(tmpdphi_rly * coord_z + tmprl * grly[idx_lm * 3 + 2]);
+                    }
+                }
             }
         }
     }
